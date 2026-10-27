@@ -20,10 +20,12 @@ future work.
    npm install
    ```
 
-2. Copy `.env.example` to a repository-root `.env`, set `MONGODB_URI`, and
-   replace the `JWT_SECRET` placeholder with a private random value of at least 32
-   characters. The checked-in value is not a usable secret. Do not commit `.env`
-   or share your secret.
+2. Copy `.env.example` to a repository-root `.env`. Set the required
+   `MONGODB_URI` and `CLIENT_ORIGIN` values, then replace the `JWT_SECRET`
+   placeholder with a private random value of at least 32 characters.
+   `NODE_ENV`, `PORT`, and the access-token lifetime have development defaults;
+   `TEST_MONGODB_URI` is only needed for integration tests. The checked-in JWT
+   value is not a usable secret. Do not commit `.env` or share your secret.
 
 3. Start MongoDB, then run both applications:
 
@@ -39,7 +41,34 @@ future work.
    port, in which case update `CLIENT_ORIGIN` to match. The API refuses to
    start until MongoDB is available.
 
-4. Open the frontend and register an account.
+4. Open `http://localhost:5173` and register an account.
+
+## Demo seed
+
+From the repository root, run:
+
+```sh
+npm run seed:demo
+```
+
+The command explicitly seeds the MongoDB database in the repository-root
+`.env`; it runs only with `NODE_ENV=development` and is never run automatically
+when the application starts. It is safe to repeat: demo users are created only
+when absent, and the sample project, columns, and cards use stable IDs so they
+are not duplicated. Existing demo-email accounts with different passwords are
+left unchanged and cause the script to stop with a safe error.
+
+Local-only demo credentials:
+
+| Role | Email | Password |
+| --- | --- | --- |
+| Project owner | `demo.owner@example.test` | `Local-owner-password-2026!` |
+| Project member | `demo.member@example.test` | `Local-member-password-2026!` |
+
+These credentials are for local development only. Do not use them in production
+or expose them on a public deployment. The seed includes a `TaskBoard Demo
+Project` with the default columns and sample cards assigned to its owner and
+member.
 
 MongoDB integration tests are deliberately separate from `npm test` and do not
 run unless explicitly requested. For a disposable local database, set
@@ -73,6 +102,7 @@ Run these commands from the repository root:
 | `npm run typecheck` | Type-check client and server |
 | `npm test` | Run client and server tests |
 | `npm run test:integration` | Opt-in MongoDB persistence tests; requires `TEST_MONGODB_URI` |
+| `npm run seed:demo` | Seed local-only demo users and project in development |
 | `npm run build` | Create the client and server production builds |
 | `npm audit` | Check installed dependencies for known advisories |
 
@@ -256,27 +286,45 @@ Cookie: taskboard_access=<HttpOnly session cookie>
 
 ## Testing
 
-`npm test` runs client and backend suites. The backend auth, project, card, comment, activity, and
-health endpoint tests use isolated in-memory repositories; they exercise real bcrypt
-hashing, signed JWT cookies, authentication middleware, logout invalidation,
-project membership filtering, and API responses without a production or local
-MongoDB server. They do not test MongoDB server behavior or the Mongoose
-adapters against a live database.
+`npm test` runs the client and backend unit suites. Backend auth, project, card,
+comment, activity, and health endpoint tests use isolated in-memory
+repositories. They exercise real bcrypt hashing, signed JWT cookies,
+authentication middleware, logout invalidation, project membership checks,
+and API responses without connecting to MongoDB.
+
+The MongoDB integration suite is opt-in and runs separately:
+
+```sh
+npm run test:integration
+```
+
+Set `TEST_MONGODB_URI` in the environment or repository-root `.env` to a
+disposable test database before running it. The runner refuses a missing or
+invalid URI and requires the database name to contain `test` as a separate
+segment (for example, `taskboard_test`). It never drops a database or
+collection; the suite removes only the records it creates. Against the actual
+Mongoose repositories and configured database, it checks project/default
+column persistence, concurrent column reorder activity, card creation/editing/
+movement/deletion, comments and session-derived authors, activity persistence,
+stale and concurrent card-move version guards, and persistence after reconnect.
+Do not use a production or personal database for this command.
 
 ## Milestone status and limitations
 
-Implemented: responsive application/authentication screens, registration,
-login, protected workspace route, session check, logout, user model, server
-validation, cookie-based access tokens, API security middleware, database
-connection lifecycle, project creation/list/detail APIs, owner-only member
-addition, default project columns, persistent column management and cards,
-fractional card ordering, and server-side project membership checks. The
-frontend loads persisted columns and cards, supports project/card creation,
-editing and deletion, column creation/reordering, card drag-and-drop, card
-comments, and a recent activity timeline.
+Implemented: registration, login, protected workspace route, session check,
+logout, password hashing, cookie-based access tokens, server validation and
+security middleware, and MongoDB-backed users and projects. Project APIs
+support member-only access and owner addition of existing registered users by
+email. Project columns support create, rename, and reorder APIs; the workspace
+loads persisted columns and cards, supports column creation/reordering, card
+creation/editing/deletion and drag-and-drop, and displays comments and recent
+activity. Card ordering uses fractional positions and server-side version
+checks. A repeatable development seed creates two local-only demo accounts and
+a sample project.
 
-Not implemented yet: member removal/invitations, filters, live updates, and
-seed/demo data.
+Not implemented: member removal, invitations for unregistered users, a
+member-management UI, card filters, and live updates. Column renaming is
+available through the API but not yet exposed in the workspace UI.
 
 ## AI-tool usage
 
@@ -288,10 +336,9 @@ is claimed here.
 
 ## Future improvements
 
-- Add member invitation/removal and role management.
-- Add integration tests against a disposable MongoDB instance, including
-  - Add integration coverage against a disposable MongoDB instance, including
-  version-guard behavior under concurrent writes and Mongoose update pipelines.
+- Add member removal, invitations for unregistered users, and member-management
+  UI.
+- Add card filters and live updates.
 - Add CSRF tokens if the deployment topology requires cross-site cookies.
 - Add account recovery, email verification, and refresh-session management
   before using the application with real user accounts.
