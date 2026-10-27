@@ -4,6 +4,7 @@ import { requireAuthenticatedUser } from "../auth/auth.routes.js";
 import {
   addProjectMemberSchema,
   cardParamsSchema,
+  commentSchema,
   createProjectSchema,
   createCardSchema,
   moveCardSchema,
@@ -80,6 +81,13 @@ export function createProjectsRouter(auth: AuthService, projects: ProjectService
     response.status(200).json({ columns });
   });
 
+  router.get("/:projectId/activity", async (request, response) => {
+    const user = getAuthenticatedUser(response.locals.authUser);
+    const { projectId } = projectIdSchema.parse(request.params);
+    const activities = await projects.listActivity(projectId, user.id);
+    response.status(200).json({ activities });
+  });
+
   router.get("/:projectId/cards", async (request, response) => {
     const user = getAuthenticatedUser(response.locals.authUser);
     const { projectId } = projectIdSchema.parse(request.params);
@@ -116,6 +124,21 @@ export function createProjectsRouter(auth: AuthService, projects: ProjectService
     const { projectId, cardId } = cardParamsSchema.parse(request.params);
     await projects.deleteCard(projectId, cardId, user.id);
     response.status(204).end();
+  });
+
+  router.get("/:projectId/cards/:cardId/comments", async (request, response) => {
+    const user = getAuthenticatedUser(response.locals.authUser);
+    const { projectId, cardId } = cardParamsSchema.parse(request.params);
+    const comments = await projects.listComments(projectId, cardId, user.id);
+    response.status(200).json({ comments });
+  });
+
+  router.post("/:projectId/cards/:cardId/comments", async (request, response) => {
+    const user = getAuthenticatedUser(response.locals.authUser);
+    const { projectId, cardId } = cardParamsSchema.parse(request.params);
+    const input = commentSchema.parse(request.body);
+    const comments = await projects.addComment(projectId, cardId, user.id, input);
+    response.status(201).json({ comments });
   });
 
   return router;

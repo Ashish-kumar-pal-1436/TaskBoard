@@ -13,7 +13,9 @@ import {
 } from "../src/features/projects/project.service.js";
 import type {
   NewCard,
+  NewComment,
   NewProject,
+  ProjectActivityAction,
   ProjectRecord,
   ProjectRepository,
 } from "../src/features/projects/project.repository.js";
@@ -67,6 +69,7 @@ class MemoryProjectRepository implements ProjectRepository {
         position,
       })),
       cards: [],
+      activities: [],
       version: 0,
       createdAt: now,
       updatedAt: now,
@@ -94,14 +97,20 @@ class MemoryProjectRepository implements ProjectRepository {
     return project;
   }
 
-  async createColumn(projectId: string, name: string): Promise<ProjectRecord | null> {
+  async createColumn(
+    projectId: string,
+    name: string,
+    actorId: string,
+  ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     if (!project) return null;
-    project.columns.push({
+    const column = {
       id: new mongoose.Types.ObjectId().toString(),
       name,
       position: project.columns.length,
-    });
+    };
+    project.columns.push(column);
+    this.addActivity(project, actorId, "column.created", column.id, { name });
     return project;
   }
 
@@ -109,17 +118,21 @@ class MemoryProjectRepository implements ProjectRepository {
     projectId: string,
     columnId: string,
     name: string,
+    actorId: string,
+    previousName: string,
   ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     const column = project?.columns.find((item) => item.id === columnId);
     if (!project || !column) return null;
     column.name = name;
+    this.addActivity(project, actorId, "column.renamed", columnId, { name, previousName });
     return project;
   }
 
   async reorderColumns(
     projectId: string,
     columnIds: string[],
+    actorId: string,
   ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     if (!project) return null;
@@ -131,22 +144,34 @@ class MemoryProjectRepository implements ProjectRepository {
       ...byId.get(id)!,
       position,
     }));
+    this.addActivity(project, actorId, "column.reordered", projectId, {});
     return project;
   }
 
-  async createCard(projectId: string, input: NewCard): Promise<ProjectRecord | null> {
+  async createCard(
+    projectId: string,
+    input: NewCard,
+    actorId: string,
+    columnName: string,
+  ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     if (!project) return null;
     const lastPosition = project.cards
       .filter((card) => card.columnId === input.columnId)
       .reduce((max, card) => Math.max(max, card.position), 0);
     const now = new Date();
-    project.cards.push({
+    const card = {
       id: new mongoose.Types.ObjectId().toString(),
       ...input,
+      comments: [],
       position: lastPosition + 1,
       createdAt: now,
       updatedAt: now,
+    };
+    project.cards.push(card);
+    this.addActivity(project, actorId, "card.created", card.id, {
+      title: card.title,
+      toColumn: columnName,
     });
     project.version += 1;
     return project;
@@ -156,21 +181,30 @@ class MemoryProjectRepository implements ProjectRepository {
     projectId: string,
     cardId: string,
     fields: Partial<Omit<NewCard, "columnId">>,
+    actorId: string,
+    activityTitle: string,
   ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     const card = project?.cards.find((item) => item.id === cardId);
     if (!project || !card) return null;
     Object.assign(card, fields, { updatedAt: new Date() });
+    this.addActivity(project, actorId, "card.updated", cardId, { title: activityTitle });
     project.version += 1;
     return project;
   }
 
-  async deleteCard(projectId: string, cardId: string): Promise<ProjectRecord | null> {
+  async deleteCard(
+    projectId: string,
+    cardId: string,
+    actorId: string,
+    title: string,
+  ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     if (!project) return null;
     const index = project.cards.findIndex((card) => card.id === cardId);
     if (index < 0) return null;
     project.cards.splice(index, 1);
+    this.addActivity(project, actorId, "card.deleted", cardId, { title });
     project.version += 1;
     return project;
   }
@@ -181,6 +215,10 @@ class MemoryProjectRepository implements ProjectRepository {
     columnId: string,
     position: number,
     expectedVersion: number,
+    actorId: string,
+    title: string,
+    fromColumn: string,
+    toColumn: string,
   ): Promise<ProjectRecord | null> {
     const project = this.records.get(projectId);
     const card = project?.cards.find((item) => item.id === cardId);
@@ -188,8 +226,53 @@ class MemoryProjectRepository implements ProjectRepository {
     card.columnId = columnId;
     card.position = position;
     card.updatedAt = new Date();
+    this.addActivity(project, actorId, "card.moved", cardId, {
+      title,
+      fromColumn,
+      toColumn,
+    });
     project.version += 1;
     return project;
+  }
+
+  async addComment(
+    projectId: string,
+    cardId: string,
+    input: NewComment,
+    cardTitle: string,
+  ): Promise<ProjectRecord | null> {
+    const project = this.records.get(projectId);
+    const card = project?.cards.find((item) => item.id === cardId);
+    if (!project || !card) return null;
+    const now = new Date();
+    card.comments.push({
+      id: new mongoose.Types.ObjectId().toString(),
+      ...input,
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.addActivity(project, input.authorId, "comment.added", card.comments.at(-1)!.id, {
+      title: cardTitle,
+    });
+    return project;
+  }
+
+  private addActivity(
+    project: ProjectRecord,
+    actorId: string,
+    action: ProjectActivityAction,
+    entityId: string,
+    metadata: ProjectRecord["activities"][number]["metadata"],
+  ) {
+    project.activities.push({
+      id: new mongoose.Types.ObjectId().toString(),
+      projectId: project.id,
+      actorId,
+      action,
+      entityId,
+      metadata,
+      createdAt: new Date(),
+    });
   }
 
   getColumns(projectId: string): ProjectColumnRecord[] {
@@ -260,6 +343,201 @@ describe("project APIs", () => {
       name: "Website refresh",
       ownerId: userId,
       role: "owner",
+    });
+  });
+
+  describe("comments and project activity", () => {
+    async function createCardFor(
+      app: ReturnType<typeof setup>["app"],
+      email: string,
+      projectName: string,
+    ) {
+      const user = await register(app, email);
+      const project = await user.agent.post("/api/projects").send({ name: projectName });
+      const projectId = project.body.project.id as string;
+      const columns = await user.agent.get(`/api/projects/${projectId}/columns`);
+      const columnId = columns.body.columns[0].id as string;
+      const cardResponse = await user.agent.post(`/api/projects/${projectId}/cards`).send({
+        columnId,
+        title: "Test card",
+      });
+      const cardId = cardResponse.body.cards[0].id as string;
+      return { user, projectId, columnId, cardId };
+    }
+
+    it("lists and creates comments with the authenticated author", async () => {
+      const { app } = setup();
+      const board = await createCardFor(app, "comments-owner@example.com", "Comments");
+      const author = await register(app, "comments-author@example.com");
+      await board.user.agent
+        .post(`/api/projects/${board.projectId}/members`)
+        .send({ email: "comments-author@example.com" });
+      const path = `/api/projects/${board.projectId}/cards/${board.cardId}/comments`;
+
+      const create = await author.agent.post(path).send({ content: "  Looks good!  " });
+      const list = await author.agent.get(path);
+
+      expect(create.status).toBe(201);
+      expect(create.body.comments[0]).toMatchObject({
+        authorId: author.userId,
+        authorName: "Project User",
+        content: "Looks good!",
+      });
+      expect(create.body.comments[0].createdAt).toBeTruthy();
+      expect(list.status).toBe(200);
+      expect(list.body.comments).toEqual(create.body.comments);
+
+      const spoof = await author.agent.post(path).send({
+        content: "I am someone else",
+        authorId: board.user.userId,
+      });
+      expect(spoof.status).toBe(400);
+      expect(spoof.body.error.code).toBe("VALIDATION_ERROR");
+    });
+
+    it("rejects unauthenticated, empty, and oversized comment requests", async () => {
+      const { app } = setup();
+      const board = await createCardFor(app, "comments-input@example.com", "Comment input");
+      const path = `/api/projects/${board.projectId}/cards/${board.cardId}/comments`;
+      const unauthenticatedList = await request(app).get(path);
+      const unauthenticatedCreate = await request(app).post(path).send({ content: "Hello" });
+      const unauthenticatedActivity = await request(app).get(
+        `/api/projects/${board.projectId}/activity`,
+      );
+      const empty = await board.user.agent.post(path).send({ content: "   " });
+      const oversized = await board.user.agent.post(path).send({ content: "x".repeat(2001) });
+
+      expect(unauthenticatedList.status).toBe(401);
+      expect(unauthenticatedCreate.status).toBe(401);
+      expect(unauthenticatedActivity.status).toBe(401);
+      for (const response of [empty, oversized]) {
+        expect(response.status).toBe(400);
+        expect(response.body.error.code).toBe("VALIDATION_ERROR");
+      }
+    });
+
+    it("hides comments from non-members and prevents cross-project card access", async () => {
+      const { app } = setup();
+      const board = await createCardFor(app, "comments-isolation@example.com", "Private comments");
+      const other = await board.user.agent.post("/api/projects").send({ name: "Other board" });
+      const outsider = await register(app, "comments-outsider@example.com");
+      const path = `/api/projects/${board.projectId}/cards/${board.cardId}/comments`;
+      const otherProjectPath = `/api/projects/${other.body.project.id}/cards/${board.cardId}/comments`;
+
+      const list = await outsider.agent.get(path);
+      const create = await outsider.agent.post(path).send({ content: "No access" });
+      const crossProject = await board.user.agent.get(otherProjectPath);
+      const activityBefore = await board.user.agent.get(
+        `/api/projects/${board.projectId}/activity`,
+      );
+      const failedComment = await board.user.agent
+        .post(otherProjectPath)
+        .send({ content: "Wrong project" });
+      const activityAfter = await board.user.agent.get(
+        `/api/projects/${board.projectId}/activity`,
+      );
+
+      expect(list.status).toBe(404);
+      expect(create.status).toBe(404);
+      expect(crossProject.status).toBe(404);
+      expect(failedComment.status).toBe(404);
+      expect(activityAfter.body.activities).toEqual(activityBefore.body.activities);
+    });
+
+    it("records successful card, comment, and column actions with verified actors", async () => {
+      const { app } = setup();
+      const board = await createCardFor(app, "activity-owner@example.com", "Activity");
+      const columns = await board.user.agent.get(`/api/projects/${board.projectId}/columns`);
+      const columnIds = columns.body.columns.map((column: { id: string }) => column.id);
+      const addedColumn = await board.user.agent
+        .post(`/api/projects/${board.projectId}/columns`)
+        .send({ name: "Review" });
+      const newColumnId = addedColumn.body.columns.at(-1).id as string;
+      await board.user.agent
+        .patch(`/api/projects/${board.projectId}/columns/${newColumnId}`)
+        .send({ name: "Ready for review" });
+      await board.user.agent
+        .patch(`/api/projects/${board.projectId}/columns/reorder`)
+        .send({ columnIds: [...columnIds, newColumnId].reverse() });
+      await board.user.agent
+        .patch(`/api/projects/${board.projectId}/cards/${board.cardId}`)
+        .send({ title: "Updated card" });
+      await board.user.agent
+        .patch(`/api/projects/${board.projectId}/cards/${board.cardId}/move`)
+        .send({ columnId: newColumnId });
+      const comment = await board.user.agent
+        .post(`/api/projects/${board.projectId}/cards/${board.cardId}/comments`)
+        .send({ content: "Review complete" });
+      await board.user.agent.delete(
+        `/api/projects/${board.projectId}/cards/${board.cardId}`,
+      );
+
+      const response = await board.user.agent.get(
+        `/api/projects/${board.projectId}/activity`,
+      );
+      const activities = response.body.activities as Array<{
+        action: string;
+        actorId: string;
+        projectId: string;
+        entityId: string;
+        actorName: string;
+        metadata: Record<string, string>;
+      }>;
+
+      expect(response.status).toBe(200);
+      expect(activities.map((activity) => activity.action)).toEqual(
+        expect.arrayContaining([
+          "card.created",
+          "card.updated",
+          "card.moved",
+          "card.deleted",
+          "comment.added",
+          "column.created",
+          "column.renamed",
+          "column.reordered",
+        ]),
+      );
+      expect(activities).toHaveLength(8);
+      expect(activities.every((activity) => activity.actorId === board.user.userId)).toBe(true);
+      expect(activities.every((activity) => activity.projectId === board.projectId)).toBe(true);
+      expect(activities.every((activity) => activity.actorName === "Project User")).toBe(true);
+      expect(activities.some((activity) => activity.entityId === comment.body.comments.at(-1).id)).toBe(
+        true,
+      );
+      expect(
+        activities.find((activity) => activity.action === "card.moved")?.metadata,
+      ).toMatchObject({ fromColumn: "To Do", toColumn: "Ready for review" });
+    });
+
+    it("does not create activity for rejected mutations or expose activity to non-members", async () => {
+      const { app } = setup();
+      const board = await createCardFor(app, "activity-failure@example.com", "No failed events");
+      const outsider = await register(app, "activity-outsider@example.com");
+      const invalidColumn = await board.user.agent
+        .post(`/api/projects/${board.projectId}/columns`)
+        .send({ name: " " });
+      const missingCard = new mongoose.Types.ObjectId().toString();
+      const failedUpdate = await board.user.agent
+        .patch(`/api/projects/${board.projectId}/cards/${missingCard}`)
+        .send({ title: "Should not exist" });
+      const failedComment = await board.user.agent
+        .post(`/api/projects/${board.projectId}/cards/${missingCard}/comments`)
+        .send({ content: "Should not exist" });
+      const hiddenActivity = await outsider.agent.get(
+        `/api/projects/${board.projectId}/activity`,
+      );
+      const activity = await board.user.agent.get(
+        `/api/projects/${board.projectId}/activity`,
+      );
+
+      expect(invalidColumn.status).toBe(400);
+      expect(failedUpdate.status).toBe(404);
+      expect(failedComment.status).toBe(404);
+      expect(hiddenActivity.status).toBe(404);
+      expect(activity.status).toBe(200);
+      expect(activity.body.activities).toEqual([
+        expect.objectContaining({ action: "card.created" }),
+      ]);
     });
   });
 

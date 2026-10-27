@@ -16,9 +16,44 @@ export interface ProjectCardRecord {
   assigneeId: string | null;
   dueDate: Date | null;
   labels: string[];
+  comments: ProjectCommentRecord[];
   position: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ProjectCommentRecord {
+  id: string;
+  authorId: string;
+  content: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export type ProjectActivityAction =
+  | "card.created"
+  | "card.updated"
+  | "card.deleted"
+  | "card.moved"
+  | "comment.added"
+  | "column.created"
+  | "column.renamed"
+  | "column.reordered";
+
+export interface ProjectActivityRecord {
+  id: string;
+  projectId: string;
+  actorId: string;
+  action: ProjectActivityAction;
+  entityId: string;
+  metadata: {
+    title?: string | null;
+    name?: string | null;
+    previousName?: string | null;
+    fromColumn?: string | null;
+    toColumn?: string | null;
+  } | null;
+  createdAt: Date;
 }
 
 export interface ProjectRecord {
@@ -28,6 +63,7 @@ export interface ProjectRecord {
   members: Array<{ userId: string; role: ProjectRole }>;
   columns: ProjectColumnRecord[];
   cards: ProjectCardRecord[];
+  activities: ProjectActivityRecord[];
   version: number;
   createdAt: Date;
   updatedAt: Date;
@@ -47,34 +83,64 @@ export interface NewCard {
   labels: string[];
 }
 
+export interface NewComment {
+  authorId: string;
+  content: string;
+}
+
 export interface ProjectRepository {
   create(input: NewProject): Promise<ProjectRecord>;
   listForMember(userId: string): Promise<ProjectRecord[]>;
   findById(id: string): Promise<ProjectRecord | null>;
   addMember(projectId: string, userId: string): Promise<ProjectRecord | null>;
-  createColumn(projectId: string, name: string): Promise<ProjectRecord | null>;
+  createColumn(projectId: string, name: string, actorId: string): Promise<ProjectRecord | null>;
   renameColumn(
     projectId: string,
     columnId: string,
     name: string,
+    actorId: string,
+    previousName: string,
   ): Promise<ProjectRecord | null>;
   reorderColumns(
     projectId: string,
     columnIds: string[],
+    actorId: string,
   ): Promise<ProjectRecord | null>;
-  createCard(projectId: string, input: NewCard): Promise<ProjectRecord | null>;
+  createCard(
+    projectId: string,
+    input: NewCard,
+    actorId: string,
+    columnName: string,
+  ): Promise<ProjectRecord | null>;
   updateCard(
     projectId: string,
     cardId: string,
     fields: Partial<Omit<NewCard, "columnId">>,
+    actorId: string,
+    activityTitle: string,
   ): Promise<ProjectRecord | null>;
-  deleteCard(projectId: string, cardId: string): Promise<ProjectRecord | null>;
+  deleteCard(
+    projectId: string,
+    cardId: string,
+    actorId: string,
+    title: string,
+  ): Promise<ProjectRecord | null>;
   moveCard(
     projectId: string,
     cardId: string,
     columnId: string,
     position: number,
     expectedVersion: number,
+    actorId: string,
+    title: string,
+    fromColumn: string,
+    toColumn: string,
+  ): Promise<ProjectRecord | null>;
+  addComment(
+    projectId: string,
+    cardId: string,
+    input: NewComment,
+    cardTitle: string,
   ): Promise<ProjectRecord | null>;
 }
 
@@ -121,8 +187,13 @@ export class MongoProjectRepository implements ProjectRepository {
     return project ? toRecord(project) : null;
   }
 
-  async createColumn(projectId: string, name: string): Promise<ProjectRecord | null> {
+  async createColumn(
+    projectId: string,
+    name: string,
+    actorId: string,
+  ): Promise<ProjectRecord | null> {
     const columnId = new mongoose.Types.ObjectId();
+    const activity = createActivity(projectId, actorId, "column.created", columnId.toString(), { name });
     const result = await ProjectModel.updateOne(
       { _id: new mongoose.Types.ObjectId(projectId) },
       [
@@ -140,6 +211,7 @@ export class MongoProjectRepository implements ProjectRepository {
                 ],
               ],
             },
+            activities: appendActivity("$activities", activity),
           },
         },
       ],
@@ -152,13 +224,22 @@ export class MongoProjectRepository implements ProjectRepository {
     projectId: string,
     columnId: string,
     name: string,
+    actorId: string,
+    previousName: string,
   ): Promise<ProjectRecord | null> {
+    const activity = createActivity(projectId, actorId, "column.renamed", columnId, {
+      name,
+      previousName,
+    });
     const project = await ProjectModel.findOneAndUpdate(
       {
         _id: new mongoose.Types.ObjectId(projectId),
         "columns._id": new mongoose.Types.ObjectId(columnId),
       },
-      { $set: { "columns.$.name": name } },
+      {
+        $set: { "columns.$.name": name },
+        $push: { activities: { $each: [activity], $slice: -500 } },
+      },
       { new: true, runValidators: true },
     ).exec();
     return project ? toRecord(project) : null;
@@ -167,8 +248,10 @@ export class MongoProjectRepository implements ProjectRepository {
   async reorderColumns(
     projectId: string,
     columnIds: string[],
+    actorId: string,
   ): Promise<ProjectRecord | null> {
     const orderedIds = columnIds.map((id) => new mongoose.Types.ObjectId(id));
+    const activity = createActivity(projectId, actorId, "column.reordered", projectId, {});
     const result = await ProjectModel.updateOne(
       {
         _id: new mongoose.Types.ObjectId(projectId),
@@ -205,6 +288,7 @@ export class MongoProjectRepository implements ProjectRepository {
                 },
               },
             },
+            activities: appendActivity("$activities", activity),
           },
         },
       ],
@@ -213,8 +297,17 @@ export class MongoProjectRepository implements ProjectRepository {
     return this.findById(projectId);
   }
 
-  async createCard(projectId: string, input: NewCard): Promise<ProjectRecord | null> {
+  async createCard(
+    projectId: string,
+    input: NewCard,
+    actorId: string,
+    columnName: string,
+  ): Promise<ProjectRecord | null> {
     const cardId = new mongoose.Types.ObjectId();
+    const activity = createActivity(projectId, actorId, "card.created", cardId.toString(), {
+      title: input.title,
+      toColumn: columnName,
+    });
     const card = {
       _id: cardId,
       columnId: new mongoose.Types.ObjectId(input.columnId),
@@ -225,6 +318,7 @@ export class MongoProjectRepository implements ProjectRepository {
         : null,
       dueDate: input.dueDate,
       labels: input.labels,
+      comments: [],
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -273,6 +367,7 @@ export class MongoProjectRepository implements ProjectRepository {
                 ],
               ],
             },
+            activities: appendActivity("$activities", activity),
             __v: { $add: [{ $ifNull: ["$__v", 0] }, 1] },
           },
         },
@@ -286,6 +381,8 @@ export class MongoProjectRepository implements ProjectRepository {
     projectId: string,
     cardId: string,
     fields: Partial<Omit<NewCard, "columnId">>,
+    actorId: string,
+    activityTitle: string,
   ): Promise<ProjectRecord | null> {
     const setFields: Record<string, unknown> = {};
     for (const [field, value] of Object.entries(fields)) {
@@ -296,24 +393,41 @@ export class MongoProjectRepository implements ProjectRepository {
       }
     }
     setFields["cards.$.updatedAt"] = new Date();
+    const activity = createActivity(projectId, actorId, "card.updated", cardId, {
+      title: activityTitle,
+    });
     const project = await ProjectModel.findOneAndUpdate(
       {
         _id: new mongoose.Types.ObjectId(projectId),
         "cards._id": new mongoose.Types.ObjectId(cardId),
       },
-      { $set: setFields, $inc: { __v: 1 } },
+      {
+        $set: setFields,
+        $push: { activities: { $each: [activity], $slice: -500 } },
+        $inc: { __v: 1 },
+      },
       { new: true, runValidators: true },
     ).exec();
     return project ? toRecord(project) : null;
   }
 
-  async deleteCard(projectId: string, cardId: string): Promise<ProjectRecord | null> {
+  async deleteCard(
+    projectId: string,
+    cardId: string,
+    actorId: string,
+    title: string,
+  ): Promise<ProjectRecord | null> {
+    const activity = createActivity(projectId, actorId, "card.deleted", cardId, { title });
     const project = await ProjectModel.findOneAndUpdate(
       {
         _id: new mongoose.Types.ObjectId(projectId),
         "cards._id": new mongoose.Types.ObjectId(cardId),
       },
-      { $pull: { cards: { _id: new mongoose.Types.ObjectId(cardId) } }, $inc: { __v: 1 } },
+      {
+        $pull: { cards: { _id: new mongoose.Types.ObjectId(cardId) } },
+        $push: { activities: { $each: [activity], $slice: -500 } },
+        $inc: { __v: 1 },
+      },
       { new: true },
     ).exec();
     return project ? toRecord(project) : null;
@@ -325,8 +439,17 @@ export class MongoProjectRepository implements ProjectRepository {
     columnId: string,
     position: number,
     expectedVersion: number,
+    actorId: string,
+    title: string,
+    fromColumn: string,
+    toColumn: string,
   ): Promise<ProjectRecord | null> {
     const cardObjectId = new mongoose.Types.ObjectId(cardId);
+    const activity = createActivity(projectId, actorId, "card.moved", cardId, {
+      title,
+      fromColumn,
+      toColumn,
+    });
     const result = await ProjectModel.updateOne(
       {
         _id: new mongoose.Types.ObjectId(projectId),
@@ -358,6 +481,7 @@ export class MongoProjectRepository implements ProjectRepository {
                 },
               },
             },
+            activities: appendActivity("$activities", activity),
             __v: { $add: ["$__v", 1] },
           },
         },
@@ -365,6 +489,44 @@ export class MongoProjectRepository implements ProjectRepository {
     ).exec();
     if (result.matchedCount === 0) return null;
     return this.findById(projectId);
+  }
+
+  async addComment(
+    projectId: string,
+    cardId: string,
+    input: NewComment,
+    cardTitle: string,
+  ): Promise<ProjectRecord | null> {
+    const commentId = new mongoose.Types.ObjectId();
+    const now = new Date();
+    const activity = createActivity(
+      projectId,
+      input.authorId,
+      "comment.added",
+      commentId.toString(),
+      { title: cardTitle },
+    );
+    const project = await ProjectModel.findOneAndUpdate(
+      {
+        _id: new mongoose.Types.ObjectId(projectId),
+        "cards._id": new mongoose.Types.ObjectId(cardId),
+      },
+      {
+        $push: {
+          "cards.$.comments": {
+            _id: commentId,
+            authorId: new mongoose.Types.ObjectId(input.authorId),
+            content: input.content,
+            createdAt: now,
+            updatedAt: now,
+          },
+          activities: { $each: [activity], $slice: -500 },
+        },
+        $inc: { __v: 1 },
+      },
+      { new: true, runValidators: true },
+    ).exec();
+    return project ? toRecord(project) : null;
   }
 }
 
@@ -386,9 +548,25 @@ function toRecord(project: {
     assigneeId?: { toString(): string } | null;
     dueDate?: Date | null;
     labels?: string[];
+    comments?: Array<{
+      _id: { toString(): string };
+      authorId: { toString(): string };
+      content: string;
+      createdAt: Date;
+      updatedAt: Date;
+    }>;
     position: number;
     createdAt: Date;
     updatedAt: Date;
+  }>;
+  activities?: Array<{
+    _id: { toString(): string };
+    projectId: { toString(): string };
+    actorId: { toString(): string };
+    action: ProjectActivityAction;
+    entityId: { toString(): string };
+    metadata?: ProjectActivityRecord["metadata"];
+    createdAt: Date;
   }>;
   __v?: number;
   createdAt: Date;
@@ -419,12 +597,55 @@ function toRecord(project: {
         assigneeId: card.assigneeId?.toString() ?? null,
         dueDate: card.dueDate ?? null,
         labels: card.labels ?? [],
+        comments: (card.comments ?? []).map((comment) => ({
+          id: comment._id.toString(),
+          authorId: comment.authorId.toString(),
+          content: comment.content,
+          createdAt: comment.createdAt,
+          updatedAt: comment.updatedAt,
+        })),
         position: card.position,
         createdAt: card.createdAt,
         updatedAt: card.updatedAt,
       })),
+    activities: (project.activities ?? []).map((activity) => ({
+      id: activity._id.toString(),
+      projectId: activity.projectId.toString(),
+      actorId: activity.actorId.toString(),
+      action: activity.action,
+      entityId: activity.entityId.toString(),
+      metadata: activity.metadata ?? {},
+      createdAt: activity.createdAt,
+    })),
     version: project.__v ?? 0,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
+  };
+}
+
+function createActivity(
+  projectId: string,
+  actorId: string,
+  action: ProjectActivityAction,
+  entityId: string,
+  metadata: ProjectActivityRecord["metadata"],
+) {
+  return {
+    _id: new mongoose.Types.ObjectId(),
+    projectId: new mongoose.Types.ObjectId(projectId),
+    actorId: new mongoose.Types.ObjectId(actorId),
+    action,
+    entityId: new mongoose.Types.ObjectId(entityId),
+    metadata,
+    createdAt: new Date(),
+  };
+}
+
+function appendActivity(path: string, activity: ReturnType<typeof createActivity>) {
+  return {
+    $slice: [
+      { $concatArrays: [{ $ifNull: [path, []] }, [activity]] },
+      -500,
+    ],
   };
 }

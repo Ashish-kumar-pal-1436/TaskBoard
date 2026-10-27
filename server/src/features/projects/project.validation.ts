@@ -100,6 +100,12 @@ export const cardParamsSchema = z.object({
   cardId: objectIdSchema,
 });
 
+export const commentSchema = z
+  .object({
+    content: z.string().trim().min(1).max(2000),
+  })
+  .strict();
+
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type AddProjectMemberInput = z.infer<typeof addProjectMemberSchema>;
 export type RenameColumnInput = z.infer<typeof renameColumnSchema>;
@@ -107,3 +113,4 @@ export type ReorderColumnsInput = z.infer<typeof reorderColumnsSchema>;
 export type CreateCardInput = z.infer<typeof createCardSchema>;
 export type UpdateCardInput = z.infer<typeof updateCardSchema>;
 export type MoveCardInput = z.infer<typeof moveCardSchema>;
+export type CreateCommentInput = z.infer<typeof commentSchema>;

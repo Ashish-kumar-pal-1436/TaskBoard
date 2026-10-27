@@ -10,9 +10,12 @@ import type {
 import type {
   ProjectCardRecord,
   ProjectColumnRecord,
+  ProjectActivityRecord,
+  ProjectCommentRecord,
   ProjectRecord,
   ProjectRepository,
 } from "./project.repository.js";
+import type { CreateCommentInput } from "./project.validation.js";
 import type { RenameColumnInput, ReorderColumnsInput } from "./project.validation.js";
 
 export interface ProjectResponse {
@@ -31,6 +34,14 @@ export interface ColumnResponse {
 }
 
 export type CardResponse = ProjectCardRecord;
+
+export interface CommentResponse extends ProjectCommentRecord {
+  authorName: string;
+}
+
+export interface ActivityResponse extends ProjectActivityRecord {
+  actorName: string;
+}
 
 export class ProjectService {
   constructor(
@@ -102,7 +113,7 @@ export class ProjectService {
     name: string,
   ): Promise<ColumnResponse[]> {
     await this.requireOwnerProject(projectId, userId);
-    const updatedProject = await this.projects.createColumn(projectId, name);
+    const updatedProject = await this.projects.createColumn(projectId, name, userId);
     if (!updatedProject) {
       throw new AppError(404, "PROJECT_NOT_FOUND", "Project not found.");
     }
@@ -115,11 +126,16 @@ export class ProjectService {
     userId: string,
     input: RenameColumnInput,
   ): Promise<ColumnResponse[]> {
-    await this.requireOwnerProject(projectId, userId);
+    const project = await this.requireOwnerProject(projectId, userId);
+    const column = project.columns.find((item) => item.id === columnId);
+    if (!column) throw new AppError(404, "COLUMN_NOT_FOUND", "Column not found.");
+    if (input.name === column.name) return toColumnResponses(project.columns);
     const updatedProject = await this.projects.renameColumn(
       projectId,
       columnId,
       input.name,
+      userId,
+      column.name,
     );
     if (!updatedProject) {
       throw new AppError(404, "COLUMN_NOT_FOUND", "Column not found.");
@@ -145,8 +161,15 @@ export class ProjectService {
         "Reorder must include every project column exactly once.",
       );
     }
+    if (existingIds.every((id, index) => id === requestedIds[index])) {
+      return toColumnResponses(project.columns);
+    }
 
-    const updatedProject = await this.projects.reorderColumns(projectId, input.columnIds);
+    const updatedProject = await this.projects.reorderColumns(
+      projectId,
+      input.columnIds,
+      userId,
+    );
     if (!updatedProject) {
       throw new AppError(
         400,
@@ -168,9 +191,14 @@ export class ProjectService {
     input: CreateCardInput,
   ): Promise<CardResponse[]> {
     const project = await this.requireMemberProject(projectId, userId);
-    this.requireColumn(project, input.columnId);
+    const column = this.requireColumn(project, input.columnId);
     await this.requireAssignee(project, input.assigneeId);
-    const updatedProject = await this.projects.createCard(projectId, input);
+    const updatedProject = await this.projects.createCard(
+      projectId,
+      input,
+      userId,
+      column.name,
+    );
     if (!updatedProject) {
       throw new AppError(404, "PROJECT_NOT_FOUND", "Project not found.");
     }
@@ -184,13 +212,18 @@ export class ProjectService {
     input: UpdateCardInput,
   ): Promise<CardResponse[]> {
     const project = await this.requireMemberProject(projectId, userId);
-    if (!project.cards.some((card) => card.id === cardId)) {
-      throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
-    }
+    const card = project.cards.find((item) => item.id === cardId);
+    if (!card) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
     if (input.assigneeId !== undefined) {
       await this.requireAssignee(project, input.assigneeId);
     }
-    const updatedProject = await this.projects.updateCard(projectId, cardId, input);
+    const updatedProject = await this.projects.updateCard(
+      projectId,
+      cardId,
+      input,
+      userId,
+      input.title ?? card.title,
+    );
     if (!updatedProject) {
       throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
     }
@@ -203,10 +236,14 @@ export class ProjectService {
     userId: string,
   ): Promise<void> {
     const project = await this.requireMemberProject(projectId, userId);
-    if (!project.cards.some((card) => card.id === cardId)) {
-      throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
-    }
-    const updatedProject = await this.projects.deleteCard(projectId, cardId);
+    const card = project.cards.find((item) => item.id === cardId);
+    if (!card) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
+    const updatedProject = await this.projects.deleteCard(
+      projectId,
+      cardId,
+      userId,
+      card.title,
+    );
     if (!updatedProject) {
       throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
     }
@@ -221,7 +258,8 @@ export class ProjectService {
     const project = await this.requireMemberProject(projectId, userId);
     const card = project.cards.find((item) => item.id === cardId);
     if (!card) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
-    this.requireColumn(project, input.columnId);
+    const destinationColumn = this.requireColumn(project, input.columnId);
+    const sourceColumn = this.requireColumn(project, card.columnId);
 
     const destinationCards = project.cards
       .filter((item) => item.columnId === input.columnId && item.id !== cardId)
@@ -258,6 +296,9 @@ export class ProjectService {
         "Card ordering precision is exhausted at this position.",
       );
     }
+    if (card.columnId === input.columnId && card.position === position) {
+      return toCardResponses(project.cards);
+    }
 
     const updatedProject = await this.projects.moveCard(
       projectId,
@@ -265,6 +306,10 @@ export class ProjectService {
       input.columnId,
       position,
       project.version,
+      userId,
+      card.title,
+      sourceColumn.name,
+      destinationColumn.name,
     );
     if (!updatedProject) {
       throw new AppError(
@@ -274,6 +319,75 @@ export class ProjectService {
       );
     }
     return toCardResponses(updatedProject.cards);
+  }
+
+  async listComments(
+    projectId: string,
+    cardId: string,
+    userId: string,
+  ): Promise<CommentResponse[]> {
+    const project = await this.requireMemberProject(projectId, userId);
+    const card = project.cards.find((item) => item.id === cardId);
+    if (!card) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
+    const authorNames = await this.getDisplayNames(
+      card.comments.slice(-100).map((comment) => comment.authorId),
+    );
+    return card.comments.slice(-100).map((comment) => ({
+      ...comment,
+      authorName: authorNames.get(comment.authorId) ?? "Project member",
+    }));
+  }
+
+  async addComment(
+    projectId: string,
+    cardId: string,
+    userId: string,
+    input: CreateCommentInput,
+  ): Promise<CommentResponse[]> {
+    const project = await this.requireMemberProject(projectId, userId);
+    const card = project.cards.find((item) => item.id === cardId);
+    if (!card) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
+    const updatedProject = await this.projects.addComment(
+      projectId,
+      cardId,
+      { authorId: userId, content: input.content },
+      card.title,
+    );
+    if (!updatedProject) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
+    const updatedCard = updatedProject.cards.find((item) => item.id === cardId);
+    if (!updatedCard) throw new AppError(404, "CARD_NOT_FOUND", "Card not found.");
+    const authorNames = await this.getDisplayNames(
+      updatedCard.comments.slice(-100).map((comment) => comment.authorId),
+    );
+    return updatedCard.comments.slice(-100).map((comment) => ({
+      ...comment,
+      authorName: authorNames.get(comment.authorId) ?? "Project member",
+    }));
+  }
+
+  async listActivity(projectId: string, userId: string): Promise<ActivityResponse[]> {
+    const project = await this.requireMemberProject(projectId, userId);
+    const activities = [...project.activities]
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+      .slice(0, 50);
+    const actorNames = await this.getDisplayNames(
+      activities.map((activity) => activity.actorId),
+    );
+    return activities.map((activity) => ({
+      ...activity,
+      actorName: actorNames.get(activity.actorId) ?? "Project member",
+    }));
+  }
+
+  private async getDisplayNames(userIds: string[]): Promise<Map<string, string>> {
+    const uniqueIds = [...new Set(userIds)];
+    const namedUsers = await Promise.all(
+      uniqueIds.map(async (id) => {
+        const user = await this.users.findById(id);
+        return [id, user?.displayName ?? "Project member"] as const;
+      }),
+    );
+    return new Map(namedUsers);
   }
 
   private async requireMemberProject(
@@ -298,10 +412,12 @@ export class ProjectService {
     return project;
   }
 
-  private requireColumn(project: ProjectRecord, columnId: string): void {
-    if (!project.columns.some((column) => column.id === columnId)) {
+  private requireColumn(project: ProjectRecord, columnId: string): ProjectColumnRecord {
+    const column = project.columns.find((item) => item.id === columnId);
+    if (!column) {
       throw new AppError(404, "COLUMN_NOT_FOUND", "Column not found in this project.");
     }
+    return column;
   }
 
   private async requireAssignee(

@@ -31,6 +31,24 @@ const projectColumnSchema = new Schema({
   },
 });
 
+const projectCommentSchema = new Schema(
+  {
+    authorId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    content: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 1,
+      maxlength: 2000,
+    },
+  },
+  { timestamps: true },
+);
+
 const projectCardSchema = new Schema(
   {
     columnId: {
@@ -67,6 +85,10 @@ const projectCardSchema = new Schema(
         message: "Cards can have at most 8 labels of up to 24 characters each.",
       },
     },
+    comments: {
+      type: [projectCommentSchema],
+      default: [],
+    },
     position: {
       type: Number,
       required: true,
@@ -74,6 +96,50 @@ const projectCardSchema = new Schema(
     },
   },
   { timestamps: true },
+);
+
+const projectActivitySchema = new Schema(
+  {
+    projectId: {
+      type: Schema.Types.ObjectId,
+      required: true,
+    },
+    actorId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    action: {
+      type: String,
+      enum: [
+        "card.created",
+        "card.updated",
+        "card.deleted",
+        "card.moved",
+        "comment.added",
+        "column.created",
+        "column.renamed",
+        "column.reordered",
+      ],
+      required: true,
+    },
+    entityId: {
+      type: Schema.Types.ObjectId,
+      required: true,
+    },
+    metadata: {
+      title: { type: String, maxlength: 120 },
+      name: { type: String, maxlength: 50 },
+      previousName: { type: String, maxlength: 50 },
+      fromColumn: { type: String, maxlength: 50 },
+      toColumn: { type: String, maxlength: 50 },
+    },
+    createdAt: {
+      type: Date,
+      required: true,
+    },
+  },
+  { _id: true },
 );
 
 const projectSchema = new Schema(
@@ -107,6 +173,11 @@ const projectSchema = new Schema(
     },
     cards: {
       type: [projectCardSchema],
+      required: true,
+      default: [],
+    },
+    activities: {
+      type: [projectActivitySchema],
       required: true,
       default: [],
     },

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/mongodb.integration.test.ts",
+    "test:integration": "tsx tests/run-mongodb-integration.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js"
   },

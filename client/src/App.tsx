@@ -41,6 +41,39 @@ interface CardFields {
   labels: string[];
 }
 
+interface BoardComment {
+  id: string;
+  authorId: string;
+  authorName: string;
+  content: string;
+  createdAt: string;
+}
+
+interface BoardActivity {
+  id: string;
+  projectId: string;
+  actorId: string;
+  actorName: string;
+  action:
+    | "card.created"
+    | "card.updated"
+    | "card.deleted"
+    | "card.moved"
+    | "comment.added"
+    | "column.created"
+    | "column.renamed"
+    | "column.reordered";
+  entityId: string;
+  metadata: {
+    title?: string | null;
+    name?: string | null;
+    previousName?: string | null;
+    fromColumn?: string | null;
+    toColumn?: string | null;
+  } | null;
+  createdAt: string;
+}
+
 async function requestApi<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -97,11 +130,13 @@ function WorkspaceHome() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [columns, setColumns] = useState<BoardColumn[]>([]);
   const [cards, setCards] = useState<BoardCard[]>([]);
+  const [activities, setActivities] = useState<BoardActivity[]>([]);
   const [projectName, setProjectName] = useState("");
   const [columnName, setColumnName] = useState("");
   const [createCardColumnId, setCreateCardColumnId] = useState<string | null>(null);
   const [projectsLoading, setProjectsLoading] = useState(true);
   const [columnsLoading, setColumnsLoading] = useState(false);
+  const [activityLoading, setActivityLoading] = useState(true);
   const [creatingProject, setCreatingProject] = useState(false);
   const [creatingColumn, setCreatingColumn] = useState(false);
   const [movingCard, setMovingCard] = useState(false);
@@ -117,6 +152,7 @@ function WorkspaceHome() {
         setProjects(loadedProjects);
         setSelectedProjectId(firstProjectId);
         setColumnsLoading(Boolean(firstProjectId));
+        setActivityLoading(Boolean(firstProjectId));
       })
       .catch((error: unknown) => {
         if (active) {
@@ -161,11 +197,44 @@ function WorkspaceHome() {
       .finally(() => {
         if (active) setColumnsLoading(false);
       });
+    requestApi<{ activities: BoardActivity[] }>(
+      `/api/projects/${selectedProjectId}/activity`,
+    )
+      .then(({ activities: loadedActivities }) => {
+        if (active) setActivities(loadedActivities);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setBoardError(
+            error instanceof Error ? error.message : "Could not load activity.",
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setActivityLoading(false);
+      });
 
     return () => {
       active = false;
     };
   }, [selectedProjectId]);
+
+  async function reloadActivity() {
+    if (!selectedProjectId) return;
+    setActivityLoading(true);
+    try {
+      const { activities: latest } = await requestApi<{
+        activities: BoardActivity[];
+      }>(`/api/projects/${selectedProjectId}/activity`);
+      setActivities(latest);
+    } catch (error) {
+      setBoardError(
+        error instanceof Error ? error.message : "Could not refresh activity.",
+      );
+    } finally {
+      setActivityLoading(false);
+    }
+  }
 
   async function handleCreateProject(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -185,7 +254,9 @@ function WorkspaceHome() {
       setSelectedProjectId(project.id);
       setColumns([]);
       setCards([]);
+      setActivities([]);
       setColumnsLoading(true);
+      setActivityLoading(true);
       setProjectName("");
     } catch (error) {
       setBoardError(
@@ -209,6 +280,7 @@ function WorkspaceHome() {
       );
       setCards(updatedCards);
       setCreateCardColumnId(null);
+      void reloadActivity();
     } catch (error) {
       setBoardError(
         error instanceof Error ? error.message : "Could not create the card.",
@@ -225,6 +297,7 @@ function WorkspaceHome() {
         { method: "PATCH", body: JSON.stringify(fields) },
       );
       setCards(updatedCards);
+      void reloadActivity();
     } catch (error) {
       setBoardError(
         error instanceof Error ? error.message : "Could not update the card.",
@@ -240,6 +313,7 @@ function WorkspaceHome() {
         method: "DELETE",
       });
       setCards((current) => current.filter((card) => card.id !== cardId));
+      void reloadActivity();
     } catch (error) {
       setBoardError(
         error instanceof Error ? error.message : "Could not delete the card.",
@@ -267,6 +341,7 @@ function WorkspaceHome() {
         },
       );
       setCards(updatedCards);
+      void reloadActivity();
     } catch (error) {
       setBoardError(
         error instanceof Error ? error.message : "Could not move the card.",
@@ -295,6 +370,7 @@ function WorkspaceHome() {
       });
       setColumns(updatedColumns);
       setColumnName("");
+      void reloadActivity();
     } catch (error) {
       setBoardError(
         error instanceof Error ? error.message : "Could not create column.",
@@ -323,6 +399,7 @@ function WorkspaceHome() {
         body: JSON.stringify({ columnIds: reordered.map((column) => column.id) }),
       });
       setColumns(updatedColumns);
+      void reloadActivity();
     } catch (error) {
       setBoardError(
         error instanceof Error ? error.message : "Could not reorder columns.",
@@ -420,7 +497,10 @@ function WorkspaceHome() {
                 onChange={(event) => {
                   setSelectedProjectId(event.target.value);
                   setColumns([]);
+                  setCards([]);
+                  setActivities([]);
                   setColumnsLoading(true);
+                  setActivityLoading(true);
                   setBoardError(null);
                 }}
                 className="ml-2 rounded-lg border border-slate-300 bg-white px-3 py-2"
@@ -671,6 +751,11 @@ function WorkspaceHome() {
                               Delete
                             </button>
                           </div>
+                          <CardComments
+                            projectId={selectedProjectId}
+                            cardId={card.id}
+                            onCommentAdded={() => void reloadActivity()}
+                          />
                         </article>
                       ))}
                     {cards.every((card) => card.columnId !== column.id) && (
@@ -710,10 +795,202 @@ function WorkspaceHome() {
           )}
         </section>
 
+        {selectedProjectId && (
+          <section
+            aria-label="Project activity"
+            className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6"
+          >
+            <h2 className="text-lg font-semibold">Recent activity</h2>
+            {activityLoading ? (
+              <p role="status" className="py-5 text-sm text-slate-500">
+                Loading activity…
+              </p>
+            ) : activities.length === 0 ? (
+              <p className="py-5 text-sm text-slate-500">
+                No project activity yet.
+              </p>
+            ) : (
+              <ol className="mt-4 space-y-3">
+                {activities.map((activity) => (
+                  <li
+                    key={activity.id}
+                    className="border-l-2 border-indigo-100 pl-3"
+                  >
+                    <p className="text-sm text-slate-700">
+                      <span className="font-semibold">{activity.actorName}</span>{" "}
+                      {describeActivity(activity)}
+                    </p>
+                    <time
+                      dateTime={activity.createdAt}
+                      className="mt-1 block text-xs text-slate-400"
+                    >
+                      {new Date(activity.createdAt).toLocaleString()}
+                    </time>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+        )}
+
         <p className="mt-6 text-center text-xs text-slate-400">
           A focused space for your next great project.
         </p>
       </main>
+    </div>
+  );
+}
+
+function describeActivity(activity: BoardActivity): string {
+  const title = activity.metadata?.title ?? "a card";
+  switch (activity.action) {
+    case "card.created":
+      return `created ${title}${activity.metadata?.toColumn ? ` in ${activity.metadata.toColumn}` : ""}.`;
+    case "card.updated":
+      return `updated ${title}.`;
+    case "card.deleted":
+      return `deleted ${title}.`;
+    case "card.moved":
+      return `moved ${title}${activity.metadata?.fromColumn && activity.metadata.toColumn ? ` from ${activity.metadata.fromColumn} to ${activity.metadata.toColumn}` : ""}.`;
+    case "comment.added":
+      return `commented on ${title}.`;
+    case "column.created":
+      return `created the ${activity.metadata?.name ?? "new"} column.`;
+    case "column.renamed":
+      return `renamed ${activity.metadata?.previousName ?? "a column"} to ${activity.metadata?.name ?? "a new name"}.`;
+    case "column.reordered":
+      return "reordered the columns.";
+  }
+}
+
+function CardComments({
+  projectId,
+  cardId,
+  onCommentAdded,
+}: {
+  projectId: string;
+  cardId: string;
+  onCommentAdded: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [comments, setComments] = useState<BoardComment[]>([]);
+  const [content, setContent] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggleComments() {
+    const willOpen = !open;
+    setOpen(willOpen);
+    if (!willOpen || loaded) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const { comments: latest } = await requestApi<{ comments: BoardComment[] }>(
+        `/api/projects/${projectId}/cards/${cardId}/comments`,
+      );
+      setComments(latest);
+      setLoaded(true);
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error ? loadError.message : "Could not load comments.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submitComment(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = content.trim();
+    if (!trimmed || trimmed.length > 2000) {
+      setError("Comment must be between 1 and 2,000 characters.");
+      return;
+    }
+    setError(null);
+    setSubmitting(true);
+    try {
+      const { comments: latest } = await requestApi<{ comments: BoardComment[] }>(
+        `/api/projects/${projectId}/cards/${cardId}/comments`,
+        { method: "POST", body: JSON.stringify({ content: trimmed }) },
+      );
+      setComments(latest);
+      setLoaded(true);
+      setContent("");
+      onCommentAdded();
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error ? submitError.message : "Could not add comment.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-slate-100 pt-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => void toggleComments()}
+        className="text-xs font-medium text-indigo-700 hover:text-indigo-900"
+      >
+        {open ? "Hide comments" : "Comments"}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-3">
+          {loading ? (
+            <p role="status" className="text-xs text-slate-500">
+              Loading comments…
+            </p>
+          ) : comments.length === 0 && loaded ? (
+            <p className="text-xs text-slate-500">No comments yet.</p>
+          ) : (
+            <ol className="space-y-2">
+              {comments.map((comment) => (
+                <li key={comment.id} className="rounded-md bg-slate-50 p-2">
+                  <p className="whitespace-pre-wrap break-words text-xs text-slate-700">
+                    {comment.content}
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    {comment.authorName} ·{" "}
+                    <time dateTime={comment.createdAt}>
+                      {new Date(comment.createdAt).toLocaleString()}
+                    </time>
+                  </p>
+                </li>
+              ))}
+            </ol>
+          )}
+          <form onSubmit={submitComment} aria-label="Add comment" className="space-y-2">
+            <label className="sr-only" htmlFor={`comment-${cardId}`}>
+              Write a comment
+            </label>
+            <textarea
+              id={`comment-${cardId}`}
+              maxLength={2000}
+              rows={2}
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+              placeholder="Write a comment…"
+              className="w-full resize-y rounded-md border border-slate-300 px-2 py-1.5 text-xs"
+            />
+            {error && (
+              <p role="alert" className="text-xs text-rose-700">
+                {error}
+              </p>
+            )}
+            <button
+              type="submit"
+              disabled={submitting || !content.trim()}
+              className="rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+            >
+              {submitting ? "Sending…" : "Add comment"}
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

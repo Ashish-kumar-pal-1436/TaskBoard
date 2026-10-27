@@ -3,7 +3,8 @@
 A full-stack Kanban project-management assignment built as an npm-workspaces
 monorepo. It includes account authentication and project creation/list/detail
 APIs, persisted project columns and cards, and server-backed card ordering.
-Comments, activity history, and live updates remain future work.
+Card comments and project activity history are persisted; live updates remain
+future work.
 
 ## Requirements
 
@@ -19,8 +20,8 @@ Comments, activity history, and live updates remain future work.
    npm install
    ```
 
-2. Copy `.env.example` to `.env`, set `MONGODB_URI`, and replace the
-   `JWT_SECRET` placeholder with a private random value of at least 32
+2. Copy `.env.example` to a repository-root `.env`, set `MONGODB_URI`, and
+   replace the `JWT_SECRET` placeholder with a private random value of at least 32
    characters. The checked-in value is not a usable secret. Do not commit `.env`
    or share your secret.
 
@@ -32,11 +33,29 @@ Comments, activity history, and live updates remain future work.
 
    Vite's default development origin is `http://localhost:5173`, matching
    `CLIENT_ORIGIN` in `.env.example`; its `/api` proxy targets Express at
-   `http://localhost:4000`. If port 5173 is occupied, Vite may choose another
+   `http://localhost:4000`. The server loads configuration from the repository
+   root regardless of whether its script is run through npm workspaces or from
+   the server directory. If port 5173 is occupied, Vite may choose another
    port, in which case update `CLIENT_ORIGIN` to match. The API refuses to
    start until MongoDB is available.
 
 4. Open the frontend and register an account.
+
+MongoDB integration tests are deliberately separate from `npm test` and do not
+run unless explicitly requested. For a disposable local database, set
+`TEST_MONGODB_URI` (or add it to the root `.env`) to a database whose name
+clearly identifies it as a test database, such as `taskboard_test`, then run:
+
+```sh
+npm run test:integration
+```
+
+The runner refuses missing/invalid URIs and database names that do not include
+`test` as a separate name segment. The integration suite uses unique test
+records and deletes only the exact project and account IDs it created; it
+never drops a database or collection. Do not point it at production or personal
+data. The suite reconnects to the configured test database and checks persisted
+records after reconnection. Unit tests continue to use in-memory repositories.
 
 For separate frontend and backend deployments, set `CLIENT_ORIGIN` to the
 frontend's exact origin (scheme, hostname, and port, with no path). Configure a
@@ -53,6 +72,7 @@ Run these commands from the repository root:
 | `npm run lint` | Lint the workspace with ESLint |
 | `npm run typecheck` | Type-check client and server |
 | `npm test` | Run client and server tests |
+| `npm run test:integration` | Opt-in MongoDB persistence tests; requires `TEST_MONGODB_URI` |
 | `npm run build` | Create the client and server production builds |
 | `npm audit` | Check installed dependencies for known advisories |
 
@@ -93,6 +113,9 @@ include a `details` array of field messages.
 | `PATCH` | `/api/projects/:projectId/cards/:cardId` | Update card fields |
 | `DELETE` | `/api/projects/:projectId/cards/:cardId` | Delete a card |
 | `PATCH` | `/api/projects/:projectId/cards/:cardId/move` | Move a card within or between columns |
+| `GET` | `/api/projects/:projectId/cards/:cardId/comments` | List the latest 100 comments on a card |
+| `POST` | `/api/projects/:projectId/cards/:cardId/comments` | Add a comment as the authenticated user |
+| `GET` | `/api/projects/:projectId/activity` | List the latest 50 project activity entries |
 | `GET` | `/api/health` | API liveness check |
 
 Registration requires a valid email address, a display name of 2–60
@@ -175,6 +198,34 @@ positions, the API returns `POSITION_PRECISION_EXHAUSTED`; automatic rebalancing
 is not implemented yet. The workspace supports mouse drag-and-drop and
 up/down move buttons. Failed moves leave the last confirmed board state intact.
 
+Comments are embedded in their card in the project document. Each stores the
+authenticated author's user ID, trimmed content (1–2,000 characters), and
+timestamps. A comment request accepts only `content`; author identity is
+derived from the session. Members can read and add comments only when both the
+project membership and card-to-project relationship are valid. Listing returns
+the latest 100 comments with a display name resolved from the user record.
+
+Activity entries are embedded in the project document and include the project
+ID, authenticated actor ID, action, relevant entity ID, timestamp, and limited
+metadata such as a card title or column names. Activity is recorded for card
+creation, updates, deletion and moves, comment creation, and column creation,
+renaming and reordering. The API returns at most the latest 50 entries; the
+document retains at most 500, dropping the oldest entries.
+
+Project data, comments and activity share one MongoDB document. Each supported
+mutation and its activity entry are applied in a single document update, so
+they succeed or fail atomically without a multi-document transaction. Failed
+or unauthorized operations do not append activity. Activity text is rendered
+from server-generated action types and metadata; clients cannot submit an
+activity message or actor ID. Activity access requires project membership.
+
+The project is stored as a single MongoDB document. Activity history is capped
+at 500 entries, but the number of cards and comments is currently unbounded;
+large projects can eventually exceed MongoDB's 16 MiB BSON document limit.
+Before production-scale use, move high-volume cards/comments to separate
+collections (with appropriate transactional or outbox handling for activity)
+or define and enforce explicit retention limits.
+
 Card API request examples:
 
 ```http
@@ -205,7 +256,7 @@ Cookie: taskboard_access=<HttpOnly session cookie>
 
 ## Testing
 
-`npm test` runs client and backend suites. The backend auth, project, card, and
+`npm test` runs client and backend suites. The backend auth, project, card, comment, activity, and
 health endpoint tests use isolated in-memory repositories; they exercise real bcrypt
 hashing, signed JWT cookies, authentication middleware, logout invalidation,
 project membership filtering, and API responses without a production or local
@@ -221,10 +272,11 @@ connection lifecycle, project creation/list/detail APIs, owner-only member
 addition, default project columns, persistent column management and cards,
 fractional card ordering, and server-side project membership checks. The
 frontend loads persisted columns and cards, supports project/card creation,
-editing and deletion, column creation/reordering, and card drag-and-drop.
+editing and deletion, column creation/reordering, card drag-and-drop, card
+comments, and a recent activity timeline.
 
-Not implemented yet: member removal/invitations, comments, activity, filters,
-and seed/demo data.
+Not implemented yet: member removal/invitations, filters, live updates, and
+seed/demo data.
 
 ## AI-tool usage
 
@@ -238,7 +290,8 @@ is claimed here.
 
 - Add member invitation/removal and role management.
 - Add integration tests against a disposable MongoDB instance, including
-  unique-index and transaction behavior.
+  - Add integration coverage against a disposable MongoDB instance, including
+  version-guard behavior under concurrent writes and Mongoose update pipelines.
 - Add CSRF tokens if the deployment topology requires cross-site cookies.
 - Add account recovery, email verification, and refresh-session management
   before using the application with real user accounts.

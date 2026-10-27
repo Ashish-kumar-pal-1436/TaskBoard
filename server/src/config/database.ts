@@ -4,6 +4,8 @@ import { UserModel } from "../features/auth/user.model.js";
 
 mongoose.set("bufferCommands", false);
 
+let modelsInitialized = false;
+
 export async function connectToDatabase(
   uri: string,
   onUnavailable: (error: Error) => void = (error) => {
@@ -15,8 +17,11 @@ export async function connectToDatabase(
   });
   mongoose.connection.on("error", onUnavailable);
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 5000 });
-  await UserModel.init();
-  await ProjectModel.init();
+  if (!modelsInitialized) {
+    await UserModel.init();
+    await ProjectModel.init();
+    modelsInitialized = true;
+  }
 }
 
 export async function disconnectFromDatabase(): Promise<void> {

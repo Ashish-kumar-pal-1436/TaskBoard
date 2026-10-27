@@ -95,6 +95,47 @@ describe("authentication routes", () => {
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
+      if (path === "/api/projects/abcdef0123456789abcdef01/activity") {
+        return new Response(
+          JSON.stringify({
+            activities: [
+              {
+                id: "300000000000000000000001",
+                projectId: "abcdef0123456789abcdef01",
+                actorId: "0123456789abcdef01234567",
+                actorName: "Project Owner",
+                action: "card.created",
+                entityId: "200000000000000000000001",
+                metadata: { title: "Persisted task", toColumn: "Draft" },
+                createdAt: "2026-10-28T00:00:00.000Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (path.endsWith("/cards/200000000000000000000001/comments")) {
+        const method = fetchMock.mock.calls.at(-1)?.[1]?.method;
+        const comments =
+          method === "POST"
+            ? [
+                {
+                  id: "400000000000000000000001",
+                  authorId: "0123456789abcdef01234567",
+                  authorName: "Project Owner",
+                  content: "Looks good",
+                  createdAt: "2026-10-28T00:00:00.000Z",
+                },
+              ]
+            : [];
+        return new Response(
+          JSON.stringify({ comments }),
+          {
+            status: method === "POST" ? 201 : 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
       if (
         path === "/api/projects/abcdef0123456789abcdef01/cards" &&
         fetchMock.mock.calls.at(-1)?.[1]?.method !== "POST"
@@ -160,7 +201,23 @@ describe("authentication routes", () => {
     expect(await screen.findByRole("heading", { name: "Persisted task" })).toBeVisible();
     expect(screen.getAllByText("Loaded from the API")[0]).toBeVisible();
     expect(screen.getByText("API")).toBeVisible();
+    const timeline = screen.getByRole("region", { name: "Project activity" });
+    const activityItem = await within(timeline).findByRole("listitem");
+    expect(within(activityItem).getByText("Project Owner")).toBeVisible();
+    expect(
+      within(activityItem).getByText(/created Persisted task in Draft/),
+    ).toBeVisible();
     expect(screen.queryByText("Map the first-run experience")).not.toBeInTheDocument();
+
+    const card = screen.getByRole("article");
+    fireEvent.click(within(card).getByRole("button", { name: "Comments" }));
+    expect(await screen.findByText("No comments yet.")).toBeVisible();
+    fireEvent.change(within(card).getByLabelText("Write a comment"), {
+      target: { value: "Looks good" },
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "Add comment" }));
+    expect(await screen.findByText("Looks good")).toBeVisible();
+    expect(screen.getByText(/Project Owner ·/)).toBeVisible();
 
     fireEvent.click(
       within(screen.getByRole("region", { name: "Draft column" })).getByRole(
